@@ -632,7 +632,7 @@ func TestCPUProfileWithFork(t *testing.T) {
 
 	heap := 1 << 30
 	if runtime.GOOS == "android" || runtime.GOOS == "sylixos" {
-		// Use smaller size for Android to avoid crash.
+		// Use smaller size for Android or SylixOS to avoid crash.
 		heap = 100 << 20
 	}
 	if runtime.GOOS == "windows" && runtime.GOARCH == "arm" {
