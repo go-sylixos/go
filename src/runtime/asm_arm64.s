@@ -19,6 +19,9 @@ TEXT runtime·rt0_go(SB),NOSPLIT|TOPFRAME,$0
 	SUB	$32, RSP
 	MOVW	R0, 8(RSP) // argc
 	MOVD	R1, 16(RSP) // argv
+#ifdef GOOS_sylixos
+	MOVD	R2, 24(RSP) // env
+#endif
 
 #ifdef TLS_darwin
 	// Initialize TLS.
@@ -80,6 +83,15 @@ nocgo:
 
 #ifdef GOOS_windows
 	BL	runtime·wintls(SB)
+#endif
+
+#ifdef GOOS_sylixos
+	MOVD	24(RSP), R0		// copy env
+	SUB	$16, RSP
+	MOVD	R0, 8(RSP) // env
+	MOVD	$0, 0(RSP) // dummy LR
+	BL	runtime·sylixosenvs(SB)
+	ADD	$16, RSP
 #endif
 
 	// Check that CPU we use for execution supports instructions targeted during compile-time.
