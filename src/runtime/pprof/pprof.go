@@ -44,7 +44,10 @@
 //	        }
 //	        defer f.Close() // error handling omitted for example
 //	        runtime.GC() // get up-to-date statistics
-//	        if err := pprof.WriteHeapProfile(f); err != nil {
+//	        // Lookup("allocs") creates a profile similar to go test -memprofile.
+//	        // Alternatively, use Lookup("heap") for a profile
+//	        // that has inuse_space as the default index.
+//	        if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
 //	            log.Fatal("could not write memory profile: ", err)
 //	        }
 //	    }
@@ -166,12 +169,6 @@ import (
 // holds a lock for 1s while 5 other goroutines are waiting for the entire
 // second to acquire the lock, its unlock call stack will report 5s of
 // contention.
-//
-// Runtime-internal locks are always reported at the location
-// "runtime._LostContendedRuntimeLock". More detailed stack traces for
-// runtime-internal locks can be obtained by setting
-// `GODEBUG=runtimecontentionstacks=1` (see package [runtime] docs for
-// caveats).
 type Profile struct {
 	name  string
 	mu    sync.Mutex
@@ -404,6 +401,25 @@ type countProfile interface {
 	Label(i int) *labelMap
 }
 
+// expandInlinedFrames copies the call stack from pcs into dst, expanding any
+// PCs corresponding to inlined calls into the corresponding PCs for the inlined
+// functions. Returns the number of frames copied to dst.
+func expandInlinedFrames(dst, pcs []uintptr) int {
+	cf := runtime.CallersFrames(pcs)
+	var n int
+	for n < len(dst) {
+		f, more := cf.Next()
+		// f.PC is a "call PC", but later consumers will expect
+		// "return PCs"
+		dst[n] = f.PC + 1
+		n++
+		if !more {
+			break
+		}
+	}
+	return n
+}
+
 // printCountCycleProfile outputs block profile records (for block or mutex profiles)
 // as the pprof-proto format output. Translations from cycle count to time duration
 // are done because The proto expects count and time (nanoseconds) instead of count
@@ -426,12 +442,11 @@ func printCountCycleProfile(w io.Writer, countName, cycleName string, records []
 		values[1] = int64(float64(r.Cycles) / cpuGHz)
 		// For count profiles, all stack addresses are
 		// return PCs, which is what appendLocsForStack expects.
-		n := pprof_fpunwindExpand(expandedStack[:], r.Stack)
+		n := expandInlinedFrames(expandedStack, r.Stack)
 		locs = b.appendLocsForStack(locs[:0], expandedStack[:n])
 		b.pbSample(values, locs, nil)
 	}
-	b.build()
-	return nil
+	return b.build()
 }
 
 // printCountProfile prints a countProfile at the specified debug level.
@@ -494,15 +509,14 @@ func printCountProfile(w io.Writer, debug int, name string, p countProfile) erro
 		var labels func()
 		if p.Label(idx) != nil {
 			labels = func() {
-				for k, v := range *p.Label(idx) {
-					b.pbLabel(tagSample_Label, k, v, 0)
+				for _, lbl := range p.Label(idx).list {
+					b.pbLabel(tagSample_Label, lbl.key, lbl.value, 0)
 				}
 			}
 		}
 		b.pbSample(values, locs, labels)
 	}
-	b.build()
-	return nil
+	return b.build()
 }
 
 // keysByCount sorts keys with higher counts first, breaking ties by key string order.
@@ -533,7 +547,7 @@ func printStackRecord(w io.Writer, stk []uintptr, allFrames bool) {
 		if name == "" {
 			show = true
 			fmt.Fprintf(w, "#\t%#x\n", frame.PC)
-		} else if name != "runtime.goexit" && (show || !strings.HasPrefix(name, "runtime.")) {
+		} else if name != "runtime.goexit" && (show || !(strings.HasPrefix(name, "runtime.") || strings.HasPrefix(name, "internal/runtime/"))) {
 			// Hide runtime.goexit and any runtime functions at the beginning.
 			// This is useful mainly for allocation traces.
 			show = true
@@ -935,7 +949,7 @@ func writeProfileInternal(w io.Writer, debug int, name string, runtimeProfile fu
 	for i := range p {
 		r := &p[i]
 		fmt.Fprintf(w, "%v %v @", r.Cycles, r.Count)
-		n := pprof_fpunwindExpand(expandedStack, r.Stack)
+		n := expandInlinedFrames(expandedStack, r.Stack)
 		stack := expandedStack[:n]
 		for _, pc := range stack {
 			fmt.Fprintf(w, " %#x", pc)

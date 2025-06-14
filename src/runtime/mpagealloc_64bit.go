@@ -77,7 +77,7 @@ func (p *pageAlloc) sysInit(test bool) {
 
 		// Reserve b bytes of memory anywhere in the address space.
 		b := alignUp(uintptr(entries)*pallocSumBytes, physPageSize)
-		r := sysReserve(nil, b)
+		r := sysReserve(nil, b, "page summary")
 		if r == nil {
 			throw("failed to reserve page summary memory")
 		}
@@ -177,7 +177,7 @@ func (p *pageAlloc) sysGrow(base, limit uintptr) {
 		}
 
 		// Map and commit need.
-		sysMap(unsafe.Pointer(need.base.addr()), need.size(), p.sysStat)
+		sysMap(unsafe.Pointer(need.base.addr()), need.size(), p.sysStat, "page alloc")
 		sysUsed(unsafe.Pointer(need.base.addr()), need.size(), need.size())
 		p.summaryMappedReady += need.size()
 	}
@@ -230,7 +230,7 @@ func (s *scavengeIndex) sysGrow(base, limit uintptr, sysStat *sysMemStat) uintpt
 
 	// If we've got something to map, map it, and update the slice bounds.
 	if need.size() != 0 {
-		sysMap(unsafe.Pointer(need.base.addr()), need.size(), sysStat)
+		sysMap(unsafe.Pointer(need.base.addr()), need.size(), sysStat, "scavenge index")
 		sysUsed(unsafe.Pointer(need.base.addr()), need.size(), need.size())
 		// Update the indices only after the new memory is valid.
 		if haveMax == 0 || needMin < haveMin {
@@ -249,7 +249,7 @@ func (s *scavengeIndex) sysGrow(base, limit uintptr, sysStat *sysMemStat) uintpt
 func (s *scavengeIndex) sysInit(test bool, sysStat *sysMemStat) uintptr {
 	n := uintptr(1<<heapAddrBits) / (pallocChunkBytes << (3 * goos.IsSylixos))
 	nbytes := n * unsafe.Sizeof(atomicScavChunkData{})
-	r := sysReserve(nil, nbytes)
+	r := sysReserve(nil, nbytes, "scavenge index")
 	sl := notInHeapSlice{(*notInHeap)(r), int(n), int(n)}
 	s.chunks = *(*[]atomicScavChunkData)(unsafe.Pointer(&sl))
 	return 0 // All memory above is mapped Reserved.

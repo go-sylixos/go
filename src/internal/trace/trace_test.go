@@ -12,10 +12,12 @@ import (
 	"internal/testenv"
 	"internal/trace"
 	"internal/trace/testtrace"
+	"internal/trace/version"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -148,12 +150,11 @@ func TestTraceCPUProfile(t *testing.T) {
 				if hogRegion != nil && ev.Goroutine() == hogRegion.Goroutine() {
 					traceSamples++
 					var fns []string
-					ev.Stack().Frames(func(frame trace.StackFrame) bool {
+					for frame := range ev.Stack().Frames() {
 						if frame.Func != "runtime.goexit" {
 							fns = append(fns, fmt.Sprintf("%s:%d", frame.Func, frame.Line))
 						}
-						return true
-					})
+					}
 					stack := strings.Join(fns, "|")
 					traceStacks[stack]++
 				}
@@ -436,21 +437,15 @@ func TestTraceStacks(t *testing.T) {
 			}...)
 		}
 		stackMatches := func(stk trace.Stack, frames []frame) bool {
-			i := 0
-			match := true
-			stk.Frames(func(f trace.StackFrame) bool {
+			for i, f := range slices.Collect(stk.Frames()) {
 				if f.Func != frames[i].fn {
-					match = false
 					return false
 				}
 				if line := uint64(frames[i].line); line != 0 && line != f.Line {
-					match = false
 					return false
 				}
-				i++
-				return true
-			})
-			return match
+			}
+			return true
 		}
 		r, err := trace.NewReader(bytes.NewReader(tb))
 		if err != nil {
@@ -507,7 +502,7 @@ func TestTraceStress(t *testing.T) {
 	case "js", "wasip1":
 		t.Skip("no os.Pipe on " + runtime.GOOS)
 	}
-	testTraceProg(t, "stress.go", nil)
+	testTraceProg(t, "stress.go", checkReaderDeterminism)
 }
 
 func TestTraceStressStartStop(t *testing.T) {
@@ -535,12 +530,54 @@ func TestTraceIterPull(t *testing.T) {
 	testTraceProg(t, "iter-pull.go", nil)
 }
 
+func checkReaderDeterminism(t *testing.T, tb, _ []byte, _ bool) {
+	events := func() []trace.Event {
+		var evs []trace.Event
+
+		r, err := trace.NewReader(bytes.NewReader(tb))
+		if err != nil {
+			t.Error(err)
+		}
+		for {
+			ev, err := r.ReadEvent()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs = append(evs, ev)
+		}
+
+		return evs
+	}
+
+	evs1 := events()
+	evs2 := events()
+
+	if l1, l2 := len(evs1), len(evs2); l1 != l2 {
+		t.Fatalf("re-reading trace gives different event count (%d != %d)", l1, l2)
+	}
+	for i, ev1 := range evs1 {
+		ev2 := evs2[i]
+		if s1, s2 := ev1.String(), ev2.String(); s1 != s2 {
+			t.Errorf("re-reading trace gives different event %d:\n%s\n%s\n", i, s1, s2)
+			break
+		}
+	}
+}
+
 func testTraceProg(t *testing.T, progName string, extra func(t *testing.T, trace, stderr []byte, stress bool)) {
 	testenv.MustHaveGoRun(t)
 
 	// Check if we're on a builder.
 	onBuilder := testenv.Builder() != ""
 	onOldBuilder := !strings.Contains(testenv.Builder(), "gotip") && !strings.Contains(testenv.Builder(), "go1")
+
+	if progName == "cgo-callback.go" && onBuilder && !onOldBuilder &&
+		runtime.GOOS == "freebsd" && runtime.GOARCH == "amd64" && race.Enabled {
+		t.Skip("test fails on freebsd-amd64-race in LUCI; see go.dev/issue/71556")
+	}
 
 	testPath := filepath.Join("./testdata/testprog", progName)
 	testName := progName
@@ -563,6 +600,10 @@ func testTraceProg(t *testing.T, progName string, extra func(t *testing.T, trace
 			godebug += "," + extraGODEBUG
 		}
 		cmd.Env = append(cmd.Env, "GODEBUG="+godebug)
+		if _, ok := os.LookupEnv("GOTRACEBACK"); !ok {
+			// Unless overriden, set GOTRACEBACK=crash.
+			cmd.Env = append(cmd.Env, "GOTRACEBACK=crash")
+		}
 
 		// Capture stdout and stderr.
 		//
@@ -581,7 +622,16 @@ func testTraceProg(t *testing.T, progName string, extra func(t *testing.T, trace
 		tb := traceBuf.Bytes()
 
 		// Test the trace and the parser.
-		testReader(t, bytes.NewReader(tb), testtrace.ExpectSuccess())
+		v := testtrace.NewValidator()
+		v.GoVersion = version.Current
+		if runtime.GOOS == "windows" && stress {
+			// Under stress mode we're constantly advancing trace generations.
+			// Windows' clock granularity is too coarse to guarantee monotonic
+			// timestamps for monotonic and wall clock time in this case, so
+			// skip the checks.
+			v.SkipClockSnapshotChecks()
+		}
+		testReader(t, bytes.NewReader(tb), v, testtrace.ExpectSuccess())
 
 		// Run some extra validation.
 		if !t.Failed() && extra != nil {
